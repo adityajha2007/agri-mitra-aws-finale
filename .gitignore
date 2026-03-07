@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+*.egg-info/
+
+# Build outputs
+frontend/dist/
+infra/cdk.out/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.hypothesis/
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+credentials.json
+
+# Testing / tools
+.playwright-mcp/
+test-crop.png
+
+# AWS
+*.zip
+cdk.context.json
