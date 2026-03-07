@@ -14,7 +14,7 @@ const quickActions = [
 export default function ChatPanel() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const ttsSupported = typeof window !== "undefined" && "speechSynthesis" in window;
@@ -49,8 +49,16 @@ export default function ChatPanel() {
     if (ttsSupported) window.speechSynthesis.cancel();
 
     let imageKey: string | undefined;
+    let imagePreview: string | undefined;
 
     if (imageFile) {
+      // Create preview URL for display in chat history
+      const reader = new FileReader();
+      imagePreview = await new Promise<string>((resolve) => {
+        reader.onloadend = () => resolve(reader.result as string);
+        reader.readAsDataURL(imageFile);
+      });
+
       try {
         const uploadResult = await api.uploadImage(imageFile);
         imageKey = uploadResult.s3_key;
@@ -69,6 +77,7 @@ export default function ChatPanel() {
       role: "user",
       content: text,
       image_key: imageKey,
+      image_preview: imagePreview,
       timestamp: new Date().toISOString(),
     };
     setMessages((prev) => [...prev, userMessage]);

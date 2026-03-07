@@ -4,6 +4,7 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   image_key?: string;
+  image_preview?: string; // Base64 data URL for displaying uploaded images
   tools_used?: string[];
   timestamp: string;
 }

@@ -1,4 +1,5 @@
 import { Bot, User } from "lucide-react";
+import ReactMarkdown from "react-markdown";
 import { ChatMessage } from "../../services/api";
 
 interface MessageBubbleProps {
@@ -28,7 +29,26 @@ export default function MessageBubble({ message }: MessageBubbleProps) {
             : "bg-white border border-gray-200 border-l-2 border-l-primary-400 text-gray-800"
         }`}
       >
-        <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+        {/* Image preview for user messages with uploaded images */}
+        {isUser && message.image_preview && (
+          <div className="mb-3">
+            <img
+              src={message.image_preview}
+              alt="Uploaded crop"
+              className="max-w-full h-auto max-h-64 rounded-lg border border-white/20"
+            />
+          </div>
+        )}
+        
+        {/* Render markdown for assistant messages, plain text for user */}
+        {isUser ? (
+          <p className="text-sm leading-relaxed whitespace-pre-wrap">{message.content}</p>
+        ) : (
+          <div className="text-sm leading-relaxed prose prose-sm max-w-none prose-headings:text-gray-800 prose-p:text-gray-800 prose-strong:text-gray-900 prose-ul:text-gray-800 prose-ol:text-gray-800 prose-li:text-gray-800">
+            <ReactMarkdown>{message.content}</ReactMarkdown>
+          </div>
+        )}
+        
         {message.tools_used && message.tools_used.length > 0 && (
           <div className="mt-2 flex flex-wrap gap-1.5">
             {message.tools_used.map((tool) => (
