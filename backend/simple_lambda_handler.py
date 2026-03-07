@@ -36,7 +36,10 @@ CONVERSATIONS_TABLE = os.environ.get("AGRI_MITRA_DYNAMODB_TABLE_CONVERSATIONS", 
 POLICIES_BUCKET = os.environ.get("AGRI_MITRA_S3_BUCKET_POLICIES", "")
 UPLOADS_BUCKET = os.environ.get("AGRI_MITRA_S3_BUCKET_UPLOADS", "")
 
-MODEL_ID = "apac.amazon.nova-lite-v1:0"
+# MODEL_ID = "apac.amazon.nova-lite-v1:0"
+
+# Using Intelligent Prompt Routing
+MODEL_ID = "arn:aws:bedrock:ap-south-1:415197220733:default-prompt-router/amazon.nova:1"
 EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 
 
