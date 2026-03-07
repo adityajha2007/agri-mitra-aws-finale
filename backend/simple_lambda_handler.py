@@ -751,20 +751,21 @@ def tool_analyze_crop_image(params):
                         },
                         {
                             "text": (
-                                "You are an expert agricultural scientist. Analyze this crop image and provide:\n"
+                                "You are an expert agricultural scientist. Analyze this image and provide the following information if the attached image is of a crop:\n"
                                 "1. Crop identification (if possible)\n"
                                 "2. Health assessment (healthy/diseased/stressed)\n"
                                 "3. Disease or pest identification (if any)\n"
                                 "4. Severity level (mild/moderate/severe)\n"
                                 "5. Recommended treatment or action\n"
                                 "6. Preventive measures\n"
-                                "Be specific and practical in your recommendations."
+                                "NOTE: Be specific and practical in your recommendations. If the image is of naything else (say a person/monument etc please refrain from making any statements)"
                             )
                         },
                     ],
                 }
             ],
             inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
+            guardrailConfig={"guardrailIdentifier": "3mfg8d8vj4ee", "guardrailVersion": "1", "trace": "enabled"},
         )
 
         # Extract text from response
@@ -932,6 +933,7 @@ def handle_chat(event):
                 messages=messages,
                 toolConfig={"tools": TOOL_DEFINITIONS},
                 inferenceConfig={"maxTokens": 2048, "temperature": 0.3},
+                guardrailConfig={"guardrailIdentifier": "3mfg8d8vj4ee", "guardrailVersion": "1", "trace": "enabled"},
             )
 
             stop_reason = response.get("stopReason", "end_turn")

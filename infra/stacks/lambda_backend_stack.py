@@ -86,7 +86,7 @@ class LambdaBackendStack(Stack):
         # Bedrock access
         self.backend_function.add_to_role_policy(
             iam.PolicyStatement(
-                actions=["bedrock:InvokeModel", "bedrock:Converse"],
+                actions=["bedrock:InvokeModel", "bedrock:ApplyGuardrail"],
                 resources=["*"],
             )
         )
