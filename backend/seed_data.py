@@ -14,7 +14,7 @@ from decimal import Decimal
 from datetime import datetime, timedelta
 
 REGION = "ap-south-1"
-TODAY = "2026-03-06"
+TODAY = datetime.now().strftime("%Y-%m-%d")
 
 # S3 buckets
 POLICIES_BUCKET = "agrimitradata-policiesbucketa55120c1-8f2zml02rpj3"
@@ -50,40 +50,69 @@ CROPS = {
 }
 
 MARKETS = [
-    ("Delhi Azadpur", "Delhi"),
-    ("Mumbai APMC", "Maharashtra"),
-    ("Nashik APMC", "Maharashtra"),
-    ("Bangalore KR Market", "Karnataka"),
-    ("Lucknow Mandi", "Uttar Pradesh"),
-    ("Agra Mandi", "Uttar Pradesh"),
+    ("Lucknow", "Uttar Pradesh"),
+    ("Pune", "Maharashtra"),
+    ("Mumbai", "Maharashtra"),
+    ("Jaipur", "Rajasthan"),
+    ("Bhopal", "Madhya Pradesh"),
+    ("Varanasi", "Uttar Pradesh"),
+    ("Nagpur", "Maharashtra"),
+    ("Bangalore", "Karnataka"),
+    ("Hyderabad", "Telangana"),
+    ("Chennai", "Tamil Nadu"),
+    ("Kolkata", "West Bengal"),
+    ("Patna", "Bihar"),
+    ("Indore", "Madhya Pradesh"),
+    ("Nashik", "Maharashtra"),
+    ("Agra", "Uttar Pradesh"),
 ]
 
 
 def seed_mandi_prices():
     table = dynamodb.Table(TABLE_MANDI)
     count = 0
+    
+    # Generate daily prices for the last 90 days for SARIMA modeling
+    today = datetime.now()
+    
     for crop_name, (low, high) in CROPS.items():
         for market_name, state in MARKETS:
-            price = random.randint(low, high)
-            spread = random.randint(50, 150)
-            min_price = price - spread
-            max_price = price + spread
-            arrivals = random.randint(50, 800)
+            # Generate 90 days of historical data
+            for days_ago in range(90, -1, -1):
+                date = (today - timedelta(days=days_ago)).strftime("%Y-%m-%d")
+                
+                # Add some trend and seasonality to prices
+                base_price = (low + high) // 2
+                trend = days_ago * 2  # Slight upward trend
+                seasonal = int(50 * (1 + 0.5 * ((days_ago % 30) / 30)))  # Monthly cycle
+                noise = random.randint(-100, 100)
+                
+                price = base_price - trend + seasonal + noise
+                price = max(low, min(high, price))  # Keep within bounds
+                
+                spread = random.randint(50, 150)
+                min_price = price - spread
+                max_price = price + spread
+                arrivals = random.randint(50, 800)
 
-            item = {
-                "crop_name": crop_name,
-                "market_date": f"{market_name}#{TODAY}",
-                "market_name": market_name,
-                "state": state,
-                "price_per_quintal": Decimal(str(price)),
-                "arrivals": arrivals,
-                "min_price": Decimal(str(min_price)),
-                "max_price": Decimal(str(max_price)),
-            }
-            table.put_item(Item=item)
-            count += 1
-            print(f"  [mandi] {crop_name} @ {market_name}: Rs {price}/q")
-    print(f"  => Inserted {count} mandi-price records.\n")
+                item = {
+                    "crop_name": crop_name,
+                    "market_date": f"{market_name}#{date}",
+                    "market_name": market_name,
+                    "state": state,
+                    "price_per_quintal": Decimal(str(price)),
+                    "arrivals": arrivals,
+                    "min_price": Decimal(str(min_price)),
+                    "max_price": Decimal(str(max_price)),
+                    "date": date,
+                }
+                table.put_item(Item=item)
+                count += 1
+                
+                if days_ago == 0:  # Only print today's prices
+                    print(f"  [mandi] {crop_name} @ {market_name}: Rs {price}/q (today)")
+    
+    print(f"  => Inserted {count} mandi-price records (90 days of daily data).\n")
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +225,7 @@ def seed_weather():
 
 def _ts(days_ago, hour):
     """Generate ISO timestamp days_ago from TODAY at given hour."""
-    dt = datetime(2026, 3, 6, hour, random.randint(0, 59), random.randint(0, 59)) - timedelta(days=days_ago)
+    dt = datetime.now().replace(hour=hour, minute=random.randint(0, 59), second=random.randint(0, 59)) - timedelta(days=days_ago)
     return dt.isoformat() + "Z"
 
 
