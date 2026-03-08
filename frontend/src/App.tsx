@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
-import { Sprout, LayoutDashboard, MessageSquare, MapPin } from "lucide-react";
+import { LayoutDashboard, MessageSquare, MapPin } from "lucide-react";
 import DashboardPanel from "./components/Dashboard/DashboardPanel";
 import ChatPanel from "./components/Chat/ChatPanel";
+import agrimitraLogo from "./agrimitra_logo.png";
 
 const DISTRICTS = [
   "Lucknow", "Pune", "Mumbai", "Jaipur", "Bhopal", "Varanasi",
@@ -31,12 +32,14 @@ export default function App() {
     <div className="h-screen flex flex-col bg-stone-50">
       {/* Header */}
       <header className="bg-gradient-to-r from-primary-800 to-primary-700 px-6 py-3 flex items-center gap-3 shadow-md">
-        <div className="w-9 h-9 bg-white/15 backdrop-blur rounded-lg flex items-center justify-center">
-          <Sprout className="w-5 h-5 text-white" />
-        </div>
+        <img 
+          src={agrimitraLogo} 
+          alt="Agri-Mitra Logo" 
+          className="w-9 h-9 rounded-lg object-contain bg-white/10 backdrop-blur p-1"
+        />
         <div className="flex-1">
           <h1 className="text-white font-bold text-lg leading-tight">Agri-Mitra</h1>
-          <p className="text-primary-200 text-xs">Your Agricultural Assistant</p>
+          <p className="text-primary-200 text-xs">Built for Farmers</p>
         </div>
         
         {/* District Selector */}
