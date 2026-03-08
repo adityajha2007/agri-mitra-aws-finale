@@ -1,16 +1,19 @@
 # Agri-Mitra
 
-A GenAI-powered agricultural assistant for Indian farmers, built on AWS. Chat with an AI agent that can look up mandi prices, weather forecasts, agricultural news, government policies, and diagnose crop diseases from photos — all in Hindi or English.
+A GenAI-powered agricultural assistant for Indian farmers, built on AWS. Chat with an AI agent that can look up mandi prices, weather forecasts, agricultural news, government policies, and diagnose crop diseases from photos — via web or WhatsApp, in Hindi, English or any rewgional language
 
 **Live:** [https://main.d1v8d9313puioo.amplifyapp.com](https://main.d1v8d9313puioo.amplifyapp.com)
 
 ## Features
 
 - **AI Chat Agent** — ReAct agent with 6 tools (prices, weather, news, policy search, crop image analysis, calculations)
+- **WhatsApp Integration** — Chat via WhatsApp with text, images, and voice notes (Twilio)
 - **Voice Input/Output** — Speak your questions and hear responses (browser-native, free)
 - **Crop Image Diagnosis** — Upload a photo of your crop for disease/pest identification
 - **Dashboard** — At-a-glance view of mandi prices, weather, and agricultural news
 - **Multilingual** — Responds in the same language you ask in (Hindi, English, etc.)
+- **Content Safety** — Bedrock Guardrails filter all responses; AWS WAF protects the API
+- **Markdown Responses** — Rich formatted answers with headings, lists, and bold text
 
 ## Tech Stack
 
@@ -18,10 +21,15 @@ A GenAI-powered agricultural assistant for Indian farmers, built on AWS. Chat wi
 |---|---|
 | Frontend | React 18, TypeScript, Tailwind CSS, Vite |
 | Backend | AWS Lambda (Python 3.12), API Gateway HTTP API |
-| AI | Amazon Nova Lite (reasoning), Titan Embeddings (RAG) |
+| AI | Amazon Nova Prompt Router (reasoning), Nova Lite (vision), Titan Embeddings (RAG) |
+| Content Safety | Bedrock Guardrails, AWS WAF (rate limiting + OWASP rules) |
+| Audio | Amazon Transcribe (WhatsApp voice notes) |
+| WhatsApp | Twilio Webhook |
 | Database | DynamoDB (6 tables) |
 | Storage | S3 (policies + crop images) |
+| Secrets | AWS Secrets Manager (4 keys) |
 | Hosting | AWS Amplify |
+| Observability | X-Ray tracing, CloudWatch logging |
 | Infrastructure | AWS CDK (Python) |
 
 ## Project Structure
@@ -29,7 +37,7 @@ A GenAI-powered agricultural assistant for Indian farmers, built on AWS. Chat wi
 ```
 agri-mitra-aws-finale/
 ├── backend/
-│   ├── simple_lambda_handler.py   # Main Lambda — ReAct agent + all API routes
+│   ├── simple_lambda_handler.py   # Main Lambda — ReAct agent + all API routes + WhatsApp webhook
 │   ├── seed_data.py               # One-time DynamoDB data seeder
 │   ├── app/                       # FastAPI app (alternative backend, not deployed)
 │   ├── tests/
@@ -38,7 +46,7 @@ agri-mitra-aws-finale/
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx                # Split-layout shell (dashboard + chat)
-│   │   ├── components/Chat/       # ChatPanel, ChatInput, MessageBubble
+│   │   ├── components/Chat/       # ChatPanel, ChatInput (voice), MessageBubble (markdown)
 │   │   ├── components/Dashboard/  # DashboardPanel, WeatherWidget, PriceTicker, NewsFeed
 │   │   └── services/api.ts        # API client
 │   ├── tailwind.config.js
@@ -53,7 +61,8 @@ agri-mitra-aws-finale/
 │   └── process_policy_docs/
 ├── design.md                      # Architecture and design document
 ├── requirements.md                # Functional requirements
-└── DEPLOYMENT.md                  # AWS deployment guide
+├── DEPLOYMENT.md                  # AWS deployment guide
+
 ```
 
 ## Quick Start
@@ -112,10 +121,12 @@ pytest tests/ -v
 | GET | `/api/dashboard/prices` | Get mandi prices |
 | GET | `/api/dashboard/weather` | Get weather data |
 | GET | `/api/dashboard/news` | Get agricultural news |
+| POST | `/sms` | Twilio WhatsApp/SMS webhook |
 | GET | `/health` | Health check |
 
 ## Documentation
 
-- **[design.md](design.md)** — Architecture, data models, agent design
+- **[design.md](design.md)** — Architecture, data models, agent design, WhatsApp flow
 - **[requirements.md](requirements.md)** — Functional requirements and acceptance criteria
 - **[DEPLOYMENT.md](DEPLOYMENT.md)** — Step-by-step AWS deployment guide
+
