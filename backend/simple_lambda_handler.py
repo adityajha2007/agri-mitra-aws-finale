@@ -742,8 +742,9 @@ def tool_analyze_crop_image(params):
         image_format = format_map.get(ext, "jpeg")
 
         # 3. Call Bedrock Converse with image for crop diagnosis
+        VISION_MODEL_ID = "apac.amazon.nova-lite-v1:0"
         analysis_response = bedrock.converse(
-            modelId=MODEL_ID,
+            modelId=VISION_MODEL_ID,
             messages=[
                 {
                     "role": "user",
@@ -763,14 +764,13 @@ def tool_analyze_crop_image(params):
                                 "4. Severity level (mild/moderate/severe)\n"
                                 "5. Recommended treatment or action\n"
                                 "6. Preventive measures\n"
-                                "NOTE: Be specific and practical in your recommendations. If the image is of naything else (say a person/monument etc please refrain from making any statements)"
+                                "NOTE: Be specific and practical in your recommendations. If the image is not of a crop or plant, politely say so."
                             )
                         },
                     ],
                 }
             ],
             inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
-            guardrailConfig={"guardrailIdentifier": "3mfg8d8vj4ee", "guardrailVersion": "3", "trace": "enabled"},
         )
 
         # Extract text from response
@@ -1169,9 +1169,11 @@ def describe_image_with_nova(image_bytes, mime_type):
     try:
         format_map = {"image/jpeg": "jpeg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
         image_format = format_map.get(mime_type, "jpeg")
-        
+
+        # Use Nova Lite directly for vision (prompt router doesn't support image input)
+        VISION_MODEL_ID = "apac.amazon.nova-lite-v1:0"
         response = bedrock.converse(
-            modelId=MODEL_ID,
+            modelId=VISION_MODEL_ID,
             messages=[{
                 "role": "user",
                 "content": [
