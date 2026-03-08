@@ -52,12 +52,13 @@ export const api = {
   async sendChatMessage(
     message: string,
     imageKey?: string,
-    history?: { role: string; content: string }[]
+    history?: { role: string; content: string }[],
+    district?: string
   ): Promise<ChatResponse> {
     const res = await fetch(`${BASE_URL}/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, image_key: imageKey, history }),
+      body: JSON.stringify({ message, image_key: imageKey, history, district }),
     });
     if (!res.ok) throw new Error(`Chat failed: ${res.status}`);
     return res.json();
@@ -74,14 +75,20 @@ export const api = {
     return res.json();
   },
 
-  async getDashboardPrices(): Promise<DashboardPrices[]> {
-    const res = await fetch(`${BASE_URL}/dashboard/prices`);
+  async getDashboardPrices(district?: string): Promise<DashboardPrices[]> {
+    const url = district 
+      ? `${BASE_URL}/dashboard/prices?district=${encodeURIComponent(district)}`
+      : `${BASE_URL}/dashboard/prices`;
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`Prices failed: ${res.status}`);
     return res.json();
   },
 
-  async getDashboardWeather(): Promise<WeatherData> {
-    const res = await fetch(`${BASE_URL}/dashboard/weather`);
+  async getDashboardWeather(district?: string): Promise<WeatherData> {
+    const url = district
+      ? `${BASE_URL}/dashboard/weather?district=${encodeURIComponent(district)}`
+      : `${BASE_URL}/dashboard/weather`;
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`Weather failed: ${res.status}`);
     return res.json();
   },

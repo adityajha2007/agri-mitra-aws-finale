@@ -1,11 +1,20 @@
 import { useState, useEffect } from "react";
-import { Sprout, LayoutDashboard, MessageSquare } from "lucide-react";
+import { Sprout, LayoutDashboard, MessageSquare, MapPin } from "lucide-react";
 import DashboardPanel from "./components/Dashboard/DashboardPanel";
 import ChatPanel from "./components/Chat/ChatPanel";
+
+const DISTRICTS = [
+  "Lucknow", "Pune", "Mumbai", "Jaipur", "Bhopal", "Varanasi",
+  "Nagpur", "Bangalore", "Hyderabad", "Chennai", "Kolkata",
+  "Patna", "Indore", "Nashik", "Agra"
+];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<"dashboard" | "chat">("chat");
   const [isMobile, setIsMobile] = useState(false);
+  const [selectedDistrict, setSelectedDistrict] = useState<string>(() => {
+    return localStorage.getItem("selectedDistrict") || "Bangalore";
+  });
 
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 1024);
@@ -14,6 +23,10 @@ export default function App() {
     return () => window.removeEventListener("resize", check);
   }, []);
 
+  useEffect(() => {
+    localStorage.setItem("selectedDistrict", selectedDistrict);
+  }, [selectedDistrict]);
+
   return (
     <div className="h-screen flex flex-col bg-stone-50">
       {/* Header */}
@@ -21,9 +34,25 @@ export default function App() {
         <div className="w-9 h-9 bg-white/15 backdrop-blur rounded-lg flex items-center justify-center">
           <Sprout className="w-5 h-5 text-white" />
         </div>
-        <div>
+        <div className="flex-1">
           <h1 className="text-white font-bold text-lg leading-tight">Agri-Mitra</h1>
           <p className="text-primary-200 text-xs">Your Agricultural Assistant</p>
+        </div>
+        
+        {/* District Selector */}
+        <div className="flex items-center gap-2 bg-white/10 backdrop-blur rounded-lg px-3 py-1.5">
+          <MapPin className="w-4 h-4 text-white" />
+          <select
+            value={selectedDistrict}
+            onChange={(e) => setSelectedDistrict(e.target.value)}
+            className="bg-transparent text-white text-sm font-medium border-none outline-none cursor-pointer"
+          >
+            {DISTRICTS.map((district) => (
+              <option key={district} value={district} className="text-gray-900">
+                {district}
+              </option>
+            ))}
+          </select>
         </div>
       </header>
 
@@ -32,15 +61,19 @@ export default function App() {
         {!isMobile ? (
           <>
             <div className="w-2/5 border-r border-gray-200 overflow-hidden">
-              <DashboardPanel />
+              <DashboardPanel district={selectedDistrict} />
             </div>
             <div className="w-3/5 overflow-hidden">
-              <ChatPanel />
+              <ChatPanel district={selectedDistrict} />
             </div>
           </>
         ) : (
           <div className="flex-1 overflow-hidden">
-            {activeTab === "dashboard" ? <DashboardPanel /> : <ChatPanel />}
+            {activeTab === "dashboard" ? (
+              <DashboardPanel district={selectedDistrict} />
+            ) : (
+              <ChatPanel district={selectedDistrict} />
+            )}
           </div>
         )}
       </div>
