@@ -36,7 +36,10 @@ CONVERSATIONS_TABLE = os.environ.get("AGRI_MITRA_DYNAMODB_TABLE_CONVERSATIONS", 
 POLICIES_BUCKET = os.environ.get("AGRI_MITRA_S3_BUCKET_POLICIES", "")
 UPLOADS_BUCKET = os.environ.get("AGRI_MITRA_S3_BUCKET_UPLOADS", "")
 
-MODEL_ID = "apac.amazon.nova-lite-v1:0"
+# MODEL_ID = "apac.amazon.nova-lite-v1:0"
+
+# Using Intelligent Prompt Routing
+MODEL_ID = "arn:aws:bedrock:ap-south-1:415197220733:default-prompt-router/amazon.nova:1"
 EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0"
 
 
@@ -765,7 +768,7 @@ def tool_analyze_crop_image(params):
                 }
             ],
             inferenceConfig={"maxTokens": 1024, "temperature": 0.2},
-            guardrailConfig={"guardrailIdentifier": "3mfg8d8vj4ee", "guardrailVersion": "1", "trace": "enabled"},
+            guardrailConfig={"guardrailIdentifier": "3mfg8d8vj4ee", "guardrailVersion": "3", "trace": "enabled"},
         )
 
         # Extract text from response
@@ -910,11 +913,24 @@ def handle_chat(event):
         # Build conversation history from client
         history = body.get("history", [])
         messages = []
-        for h in history[-10:]:  # Last 10 messages for context window safety
+        BLOCKED_MESSAGE = "Sorry, AgriMitra cannot answer this. This seems to be an harmful or blocked request-response. Please try again with a different query"
+        latest_message_was_blocked = False
+        for h in history[::-1]:  # Last 10 messages for context window safety
+            if latest_message_was_blocked:
+                latest_message_was_blocked = False
+                continue
+            
             role = h.get("role", "user")
             content = h.get("content", "")
             if role in ("user", "assistant") and content:
-                messages.append({"role": role, "content": [{"text": content}]})
+                if content == BLOCKED_MESSAGE:
+                    latest_message_was_blocked = True
+                else:
+                    messages.append({"role": role, "content": [{"text": content}]})
+                    if len(messages) >= 10:
+                        break
+        
+        messages = messages[::-1]
 
         # Add current user message
         if image_key:
@@ -922,7 +938,7 @@ def handle_chat(event):
         else:
             user_text = message
         user_content = [{"text": user_text}]
-        messages.append({"role": "user", "content": user_content})
+        latest_message = {"role": "user", "content": user_content}
         tools_used = []
 
         # ReAct loop — up to 5 iterations
@@ -930,14 +946,15 @@ def handle_chat(event):
             response = bedrock.converse(
                 modelId=MODEL_ID,
                 system=[{"text": SYSTEM_PROMPT}],
-                messages=messages,
+                messages=messages + [latest_message],
                 toolConfig={"tools": TOOL_DEFINITIONS},
                 inferenceConfig={"maxTokens": 2048, "temperature": 0.3},
-                guardrailConfig={"guardrailIdentifier": "3mfg8d8vj4ee", "guardrailVersion": "1", "trace": "enabled"},
+                guardrailConfig={"guardrailIdentifier": "3mfg8d8vj4ee", "guardrailVersion": "3", "trace": "enabled"},
             )
 
             stop_reason = response.get("stopReason", "end_turn")
             output_message = response["output"]["message"]
+            messages.append(latest_message)
             messages.append(output_message)
 
             if stop_reason == "tool_use":
