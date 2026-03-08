@@ -32,6 +32,7 @@ backend = LambdaBackendStack(
         "openweather": security.openweather_secret,
         "news_api": security.news_api_secret,
         "data_gov": security.data_gov_secret,
+        "twilio": security.twilio_secret,
     },
     env=env,
 )

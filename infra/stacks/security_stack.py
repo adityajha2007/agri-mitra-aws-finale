@@ -44,7 +44,17 @@ class SecurityStack(Stack):
             ),
         )
 
-        # --- AWS WAF Web ACL ---
+        self.twilio_secret = secretsmanager.Secret(
+            self, "TwilioWebhookCredentials",
+            secret_name="agri-mitra/twilio-credentials",
+            description="Twilio SID and Auth Token for WhatsApp Webhook media fetching",
+            generate_secret_string=secretsmanager.SecretStringGenerator(
+                secret_string_template='{"TWILIO_ACCOUNT_SID": "", "TWILIO_AUTH_TOKEN": ""}',
+                generate_string_key="placeholder",
+            ),
+        )
+
+        # --- A W S WAF Web ACL ---
 
         self.web_acl = wafv2.CfnWebACL(
             self, "AgriMitraWebACL",
