@@ -39,10 +39,7 @@ agri-mitra-aws-finale/
 ├── backend/
 │   ├── simple_lambda_handler.py   # Main Lambda — ReAct agent + all API routes + WhatsApp webhook
 │   ├── seed_data.py               # One-time DynamoDB data seeder
-│   ├── app/                       # FastAPI app (alternative backend, not deployed)
-│   ├── tests/
-│   ├── requirements.txt
-│   └── Dockerfile
+│   └── requirements.txt
 ├── frontend/
 │   ├── src/
 │   │   ├── App.tsx                # Split-layout shell (dashboard + chat)
@@ -77,18 +74,6 @@ npm run dev
 
 The frontend connects to the deployed API by default. To use a local backend, update `BASE_URL` in `src/services/api.ts`.
 
-### Backend (local development)
-
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
-# Run with FastAPI (uses app/ directory)
-uvicorn app.main:app --reload --port 8000
-```
-
 ### Deploy to AWS
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for full instructions. Summary:
@@ -103,13 +88,6 @@ cd backend && python seed_data.py
 # 3. Build and deploy frontend
 cd frontend && npm run build
 # Then deploy dist/ to Amplify (see DEPLOYMENT.md)
-```
-
-### Run Tests
-
-```bash
-cd backend
-pytest tests/ -v
 ```
 
 ## API Endpoints
