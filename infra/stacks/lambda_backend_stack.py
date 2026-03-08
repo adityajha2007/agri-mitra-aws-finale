@@ -42,6 +42,8 @@ class LambdaBackendStack(Stack):
         if secrets:
             if "openweather" in secrets:
                 environment_vars["OPENWEATHER_SECRET_ARN"] = secrets["openweather"].secret_arn
+            if "news_api" in secrets:
+                environment_vars["NEWS_API_SECRET_ARN"] = secrets["news_api"].secret_arn
             if "data_gov" in secrets:
                 environment_vars["DATA_GOV_SECRET_ARN"] = secrets["data_gov"].secret_arn
             if "twilio" in secrets:
@@ -106,6 +108,22 @@ class LambdaBackendStack(Stack):
         if secrets:
             for secret in secrets.values():
                 secret.grant_read(self.backend_function)
+                
+        # Self-Invocation Permissions (using wildcard to avoid circular dependency)
+        self.backend_function.add_to_role_policy(iam.PolicyStatement(
+            actions=["lambda:InvokeFunction"],
+            resources=["*"]
+        ))
+
+        # Transcribe permissions
+        self.backend_function.add_to_role_policy(iam.PolicyStatement(
+            actions=[
+                "transcribe:StartTranscriptionJob",
+                "transcribe:GetTranscriptionJob",
+                "transcribe:DeleteTranscriptionJob",
+            ],
+            resources=["*"] # Transcribe jobs are often ARN-agnostic at start
+        ))
 
         # --- HTTP API Gateway ---
         self.http_api = apigwv2.HttpApi(

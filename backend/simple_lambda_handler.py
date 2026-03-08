@@ -1236,6 +1236,7 @@ def handle_chat(event):
 
 import urllib.request
 import urllib.parse
+import urllib.error
 from urllib.error import URLError
 
 TWILIO_SECRET_ARN = os.environ.get("TWILIO_SECRET_ARN")
@@ -1289,43 +1290,82 @@ def fetch_twilio_media(media_url):
         print(f"Error fetching Twilio media: {e}")
         return None
 
-def transcribe_audio_with_nova(audio_bytes, mime_type):
-    """Transcribe WhatsApp audio note using Bedrock Nova."""
+import time
+import uuid
+import urllib.request
+
+transcribe_client = boto3.client('transcribe', region_name=REGION)
+
+def transcribe_audio_with_aws_transcribe(audio_bytes, mime_type):
+    """Transcribe WhatsApp audio using Amazon Transcribe by temporarily uploading to S3."""
+    if not UPLOADS_BUCKET:
+        return "(Error: UPLOADS_BUCKET not configured. Cannot process audio.)"
+
     try:
-        # Determine format (nova supports mp3, wav, flac, ogg, m4a, webm)
-        ext = "m4a" # default fallback
+        # Determine format (valid Transcribe formats: mp3, mp4, wav, flac, ogg, amr, webm)
+        ext = "m4a"  # default
         if "ogg" in mime_type: ext = "ogg"
-        elif "mp4" in mime_type or "m4a" in mime_type: ext = "m4a"
+        elif "mp4" in mime_type or "m4a" in mime_type: ext = "mp4"
         elif "webm" in mime_type: ext = "webm"
+        elif "mp3" in mime_type: ext = "mp3"
+        elif "wav" in mime_type: ext = "wav"
         
-        # We use a standard generation call, passing audio to the model
-        response = bedrock.converse(
-            modelId=MODEL_ID,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "document": {
-                            "name": "audio_note",
-                            "format": ext,
-                            "source": {"bytes": audio_bytes}
-                        }
-                    },
-                    {"text": "Transcribe this audio precisely. Return ONLY the transcribed text with no extra commentary."}
-                ]
-            }],
+        # 1. Upload bytes to S3
+        temp_file_key = f"tmp_audio/{uuid.uuid4()}.{ext}"
+        s3.put_object(
+            Bucket=UPLOADS_BUCKET,
+            Key=temp_file_key,
+            Body=audio_bytes,
+            ContentType=mime_type
         )
-        output_msg = response["output"]["message"]
-        for block in output_msg["content"]:
-            if "text" in block:
-                return block["text"].strip()
-        return ""
+        s3_uri = f"s3://{UPLOADS_BUCKET}/{temp_file_key}"
+        print(f"Uploaded Twilio audio to {s3_uri}")
+
+        # 2. Start Transcribe Job
+        job_name = f"AgriMitra_Audio_{uuid.uuid4()}"
+        transcribe_client.start_transcription_job(
+            TranscriptionJobName=job_name,
+            Media={'MediaFileUri': s3_uri},
+            IdentifyLanguage=True,  # Auto-detect language (Hindi, English, etc.)
+            MediaFormat=ext
+        )
+
+        # 3. Poll for completion (API Gateway times out at 30s, so we wait max 25s)
+        max_retries = 12
+        sleep_time = 2
+        transcript_text = "(Error: Transcription timed out)"
+        
+        for _ in range(max_retries):
+            status = transcribe_client.get_transcription_job(TranscriptionJobName=job_name)
+            job_status = status['TranscriptionJob']['TranscriptionJobStatus']
+            
+            if job_status == 'COMPLETED':
+                transcript_uri = status['TranscriptionJob']['Transcript']['TranscriptFileUri']
+                # Download transcript JSON directly from AWS provided URI
+                with urllib.request.urlopen(transcript_uri, timeout=5) as response:
+                    body = json.loads(response.read().decode('utf-8'))
+                    transcript_text = body['results']['transcripts'][0]['transcript']
+                break
+            elif job_status == 'FAILED':
+                failure_reason = status['TranscriptionJob'].get('FailureReason', 'Unknown reason')
+                print(f"Transcribe job failed: {failure_reason}")
+                transcript_text = "(Error: Audio transcription failed)"
+                break
+                
+            time.sleep(sleep_time)
+
+        # 4. Clean up S3 audio file
+        try:
+            s3.delete_object(Bucket=UPLOADS_BUCKET, Key=temp_file_key)
+            transcribe_client.delete_transcription_job(TranscriptionJobName=job_name)
+        except Exception as cleanup_err:
+            print(f"Cleanup error (ignored): {cleanup_err}")
+
+        return transcript_text.strip()
+
     except Exception as e:
-        print(f"Audio transcription error: {e}")
-        for arg in e.args:
-            if 'ValidationException' in str(arg):
-                return "(Error: Audio format not supported by current Bedrock model region. Please send text.)"
-        return ""
+        print(f"Audio transcription error (Amazon Transcribe): {e}")
+        return "(Error: Failed to transcribe audio note using AWS Transcribe. Please type your message.)"
 
 def describe_image_with_nova(image_bytes, mime_type):
     """Describe WhatsApp image using Bedrock Nova."""
@@ -1363,7 +1403,12 @@ def handle_twilio_webhook(event):
     try:
         body = event.get("body", "")
         if event.get("isBase64Encoded", False):
-            body = base64.b64decode(body).decode('utf-8')
+            try:
+                # API Gateway might base64 encode the x-www-form-urlencoded body.
+                body = base64.b64decode(body).decode('utf-8')
+            except UnicodeDecodeError:
+                # If Twilio sends weird characters that break utf-8 decoding (e.g. emojis or bad bytes)
+                body = base64.b64decode(body).decode('utf-8', errors='replace')
             
         # Parse URL-encoded form data
         parsed_body = urllib.parse.parse_qs(body)
@@ -1378,7 +1423,46 @@ def handle_twilio_webhook(event):
         media_url = get_field("MediaUrl0", "").strip()
         media_content_type = get_field("MediaContentType0", "").strip()
         
-        print(f"WhatsApp webhook from: {sender_number}, Text: {agent_input_text}, Media: {media_url}")
+        # 0. Background asynchronous invocation check
+        is_background_invocation = event.get("is_background", False)
+        
+        if media_url and not is_background_invocation:
+            lambda_client = boto3.client('lambda', region_name=REGION)
+            
+            async_payload = {
+                "body": body,
+                "isBase64Encoded": False,  # Body is already decoded at this point
+                "is_background": True,
+                "rawPath": "/sms",
+                "requestContext": {
+                    "http": {
+                        "method": "POST"
+                    }
+                }
+            }
+            
+            import os
+            current_function_name = os.environ.get('AWS_LAMBDA_FUNCTION_NAME', '')
+            
+            if current_function_name:
+                print(f"Triggering asynchronous background execution of {current_function_name} to avoid Twilio timeout for media processing.")
+                lambda_client.invoke(
+                    FunctionName=current_function_name,
+                    InvocationType='Event',  # Asynchronous
+                    Payload=json.dumps(async_payload)
+                )
+            
+            # Reply to Twilio IMMEDIATELY to stop the 15-second timeout
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "text/xml"},
+                "body": '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+            }
+
+        if is_background_invocation:
+            print(f"Background WhatsApp execution for: {sender_number}, Text: {agent_input_text}, Media: {media_url}")
+        else:
+            print(f"Synchronous WhatsApp execution for: {sender_number}, Text: {agent_input_text}")
 
         # 1. Pre-process Media if present
         if media_url:
@@ -1386,133 +1470,90 @@ def handle_twilio_webhook(event):
             if not media_bytes:
                 agent_input_text = "(Could not securely download the attached media from Twilio)"
             elif media_content_type.startswith("audio/"):
-                transcription = transcribe_audio_with_nova(media_bytes, media_content_type)
+                transcription = transcribe_audio_with_aws_transcribe(media_bytes, media_content_type)
                 agent_input_text = transcription if transcription else "(Could not understand the audio)"
             elif media_content_type.startswith("image/"):
                 description = describe_image_with_nova(media_bytes, media_content_type)
-                # Pass the visual description to the core agent as if the user typed it
-                agent_input_text = f"I have uploaded an image. Here is the visual description of it: {description}. Please help me with this."
+                # Pass the visual description as a crop diagnosis query — avoid mentioning "image" or "uploaded"
+                # so handle_chat doesn't try to call analyze_crop_image with a nonexistent key
+                agent_input_text = f"A farmer's crop shows the following visual characteristics: {description}. Based on this, provide diagnosis and advice."
         
         if not agent_input_text:
-            xml_response = '<?xml version="1.0" encoding="UTF-8"?><Response><Message>Please send a text or voice message.</Message></Response>'
+            # Return a minimal TwiML response indicating no input received
+            xml_response = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>No message received.</Message></Response>'
             return {"statusCode": 200, "headers": {"Content-Type": "text/xml"}, "body": xml_response}
 
-        # 2. Fetch Chat History (DynamoDB)
-        history = []
-        try:
-            conv_table = dynamodb.Table(CONVERSATIONS_TABLE)
-            db_response = conv_table.query(
-                KeyConditionExpression=Key("farmer_id").eq(sender_number),
-                ScanIndexForward=False, # Get latest first
-                Limit=10
-            )
-            # Reconstruct history for ReAct loop (reverse back to chronological order)
-            for item in reversed(db_response.get("Items", [])):
-                history.append({"role": "user", "content": item.get("message", "")})
-                history.append({"role": "assistant", "content": item.get("response", "")})
-        except Exception as e:
-            print(f"Failed to fetch history for WhatsApp user {sender_number}: {e}")
-
-        # 3. Duplicate ReAct Logic for Twilio
-        messages = []
-        BLOCKED_MESSAGE = "Sorry, AgriMitra cannot answer this. This seems to be an harmful or blocked request-response. Please try again with a different query"
-        latest_message_was_blocked = False
-        for h in history[::-1]:
-            if latest_message_was_blocked:
-                latest_message_was_blocked = False
-                continue
-            
-            role = h.get("role", "user")
-            content = h.get("content", "")
-            if role in ("user", "assistant") and content:
-                if content == BLOCKED_MESSAGE:
-                    latest_message_was_blocked = True
-                else:
-                    messages.append({"role": role, "content": [{"text": content}]})
-                    if len(messages) >= 10:
-                        break
-        messages = messages[::-1]
+        # 2. Reuse the /chat endpoint logic — no need to duplicate the ReAct loop
+        # Construct a fake chat event that handle_chat expects
+        load_twilio_secrets()
         
-        user_content = [{"text": agent_input_text}]
-        latest_message = {"role": "user", "content": user_content}
-        tools_used = []
-        final_text = "An error occurred."
-
-        for iteration in range(5):
-            response = bedrock.converse(
-                modelId=MODEL_ID,
-                system=[{"text": SYSTEM_PROMPT}],
-                messages=messages + [latest_message],
-                toolConfig={"tools": TOOL_DEFINITIONS},
-                inferenceConfig={"maxTokens": 2048, "temperature": 0.3},
-                guardrailConfig={"guardrailIdentifier": "3mfg8d8vj4ee", "guardrailVersion": "3", "trace": "enabled"},
-            )
-
-            stop_reason = response.get("stopReason", "end_turn")
-            output_message = response["output"]["message"]
-            messages.append(latest_message)
-            messages.append(output_message)
-
-            if stop_reason == "tool_use":
-                tool_results = []
-                for block in output_message["content"]:
-                    if "toolUse" in block:
-                        tool_call = block["toolUse"]
-                        tool_name = tool_call["name"]
-                        tool_input = tool_call["input"]
-                        tool_use_id = tool_call["toolUseId"]
-                        tools_used.append(tool_name)
-
-                        try:
-                            result_text = TOOL_DISPATCH[tool_name](tool_input)
-                        except Exception as e:
-                            result_text = f"Tool error: {str(e)}"
-
-                        tool_results.append({
-                            "toolResult": {
-                                "toolUseId": tool_use_id,
-                                "content": [{"text": result_text}],
-                            }
-                        })
-                messages.append({"role": "user", "content": tool_results})
-            else:
-                final_text = ""
-                for block in output_message["content"]:
-                    if "text" in block:
-                        final_text += block["text"]
-                final_text = re.sub(r'<thinking>.*?</thinking>\s*', '', final_text, flags=re.DOTALL)
-                final_text = re.sub(r'</?(?:response|answer|result|output)>\s*', '', final_text)
-                final_text = final_text.strip()
-
-                try:
-                    conv_table = dynamodb.Table(CONVERSATIONS_TABLE)
-                    conv_table.put_item(Item={
-                        "farmer_id": sender_number,
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "message": agent_input_text,
-                        "response": final_text,
-                        "tools_used": tools_used,
-                    })
-                except Exception as e:
-                    print(f"Failed to save conversation: {e}")
-                break
-        else:
-             final_text = "I was unable to fully process your request. Please try a simpler question."
-
-        # 4. XML Response for Twilio
-        # Twilio requires valid TwiML
-        from xml.sax.saxutils import escape
-        escaped_text = escape(final_text)
-        
-        xml_response = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{escaped_text}</Message></Response>'
-        
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Content-Type": "text/xml"
-            },
-            "body": xml_response
+        chat_body = {
+            "message": agent_input_text,
+            "farmer_id": sender_number,
+            "history": [],  # handle_chat fetches history from the client-side; for WhatsApp we skip client history
         }
+        
+        chat_event = {
+            "body": json.dumps(chat_body)
+        }
+        
+        print(f"[Twilio] Delegating to handle_chat with message: {agent_input_text[:100]}...")
+        
+        chat_response = handle_chat(chat_event)
+        
+        # Extract the response text from handle_chat's JSON response
+        try:
+            response_body = json.loads(chat_response.get("body", "{}"))
+            final_text = response_body.get("response", "Sorry, I could not process your request.")
+        except Exception:
+            final_text = "Sorry, I could not process your request."
+        
+        print(f"[Twilio] handle_chat returned: {final_text[:200]}...")
+        
+        # Send the response back via Twilio REST API (since we already returned 200 to the webhook)
+        if is_background_invocation and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+            try:
+                twilio_number = get_field("To", "")
+                send_body = final_text[:1600] if final_text else "Sorry, I could not process your request."
+                
+                print(f"Sending async Twilio reply from {twilio_number} to {sender_number}...")
+                
+                data = urllib.parse.urlencode({
+                    'To': sender_number,
+                    'From': twilio_number,
+                    'Body': send_body
+                }).encode('utf-8')
+                
+                url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+                req = urllib.request.Request(url, data=data, method="POST")
+                
+                auth_str = f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}"
+                auth_header = "Basic " + base64.b64encode(auth_str.encode("utf-8")).decode("utf-8")
+                req.add_header('Authorization', auth_header)
+                req.add_header('Content-Type', 'application/x-www-form-urlencoded')
+                
+                with urllib.request.urlopen(req) as resp:
+                    print(f"Twilio API outbound response: {resp.status}")
+                    
+            except urllib.error.HTTPError as http_err:
+                error_body = http_err.read().decode('utf-8', errors='replace')
+                print(f"Twilio HTTP Error {http_err.code}: {error_body}")
+            except Exception as twilio_err:
+                print(f"Failed to send outbound Twilio message: {twilio_err}")
+        elif not is_background_invocation:
+            # Synchronous path (text messages without media)
+            from xml.sax.saxutils import escape
+            if not final_text:
+                final_text = "Sorry, I could not process your request."
+            escaped_text = escape(final_text)
+            xml_response = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{escaped_text}</Message></Response>'
+            return {
+                "statusCode": 200,
+                "headers": {"Content-Type": "text/xml"},
+                "body": xml_response
+            }
+        
+        return {"statusCode": 200, "body": "Processing complete"}
 
     except Exception as e:
         print(f"WhatsApp webhook error: {e}")
