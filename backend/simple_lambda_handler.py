@@ -19,7 +19,7 @@ import base64
 import boto3
 from decimal import Decimal
 from datetime import datetime
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Key, Attr
 
 REGION = "ap-south-1"
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
@@ -131,6 +131,10 @@ def get_dashboard_prices(event):
         if crop:
             response = table.query(
                 KeyConditionExpression=Key("crop_name").eq(crop)
+            )
+        elif district:
+            response = table.scan(
+                FilterExpression=Attr("market_name").eq(district)
             )
         else:
             response = table.scan(Limit=60)
