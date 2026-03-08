@@ -42,10 +42,10 @@ class LambdaBackendStack(Stack):
         if secrets:
             if "openweather" in secrets:
                 environment_vars["OPENWEATHER_SECRET_ARN"] = secrets["openweather"].secret_arn
-            if "news_api" in secrets:
-                environment_vars["NEWS_API_SECRET_ARN"] = secrets["news_api"].secret_arn
             if "data_gov" in secrets:
                 environment_vars["DATA_GOV_SECRET_ARN"] = secrets["data_gov"].secret_arn
+            if "twilio" in secrets:
+                environment_vars["TWILIO_SECRET_ARN"] = secrets["twilio"].secret_arn
 
         # --- Lambda Function for Backend ---
         self.backend_function = _lambda.Function(

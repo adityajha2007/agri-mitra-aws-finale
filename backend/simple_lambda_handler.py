@@ -96,6 +96,8 @@ def handler(event, context):
         return handle_chat(event)
     elif path == "/api/upload" and http_method == "POST":
         return handle_upload(event)
+    elif path == "/sms" and http_method == "POST":
+        return handle_twilio_webhook(event)
     else:
         return api_response(404, {"error": "Not found", "path": path})
 
@@ -895,115 +897,335 @@ def handle_upload(event):
 
 
 # ==============================================================================
-# 8. REACT AGENT (handle_chat)
+# 8. CORE REACT AGENT ENGINE
 # ==============================================================================
 
+def run_agent(farmer_id, user_text, message, history=None):
+    """
+    Core ReAct agent loop decoupled from HTTP specifics.
+    Can be called by both React Web UI and Twilio Webhooks.
+    """
+    if history is None:
+        history = []
+        
+    messages = []
+    # Build conversation history from client
+    for h in history[-10:]:  # Last 10 messages for context window safety
+        role = h.get("role", "user")
+        content = h.get("content", "")
+        if role in ("user", "assistant") and content:
+            messages.append({"role": role, "content": [{"text": content}]})
+
+    # Add current user message
+    user_content = [{"text": user_text}]
+    messages.append({"role": "user", "content": user_content})
+    tools_used = []
+
+    # ReAct loop — up to 5 iterations
+    for iteration in range(5):
+        response = bedrock.converse(
+            modelId=MODEL_ID,
+            system=[{"text": SYSTEM_PROMPT}],
+            messages=messages,
+            toolConfig={"tools": TOOL_DEFINITIONS},
+            inferenceConfig={"maxTokens": 2048, "temperature": 0.3},
+        )
+
+        stop_reason = response.get("stopReason", "end_turn")
+        output_message = response["output"]["message"]
+        messages.append(output_message)
+
+        if stop_reason == "tool_use":
+            tool_results = []
+            for block in output_message["content"]:
+                if "toolUse" in block:
+                    tool_call = block["toolUse"]
+                    tool_name = tool_call["name"]
+                    tool_input = tool_call["input"]
+                    tool_use_id = tool_call["toolUseId"]
+                    tools_used.append(tool_name)
+
+                    print(f"[ReAct] iter={iteration} tool={tool_name} input={json.dumps(tool_input)}")
+
+                    try:
+                        result_text = TOOL_DISPATCH[tool_name](tool_input)
+                    except Exception as e:
+                        result_text = f"Tool error: {str(e)}"
+
+                    tool_results.append({
+                        "toolResult": {
+                            "toolUseId": tool_use_id,
+                            "content": [{"text": result_text}],
+                        }
+                    })
+
+            messages.append({"role": "user", "content": tool_results})
+        else:
+            # Final response — extract text
+            final_text = ""
+            for block in output_message["content"]:
+                if "text" in block:
+                    final_text += block["text"]
+
+            # Strip XML tags that Nova sometimes adds
+            final_text = re.sub(r'<thinking>.*?</thinking>\s*', '', final_text, flags=re.DOTALL)
+            final_text = re.sub(r'</?(?:response|answer|result|output)>\s*', '', final_text)
+            final_text = final_text.strip()
+
+            # Save conversation to DynamoDB
+            try:
+                conv_table = dynamodb.Table(CONVERSATIONS_TABLE)
+                conv_table.put_item(Item={
+                    "farmer_id": farmer_id,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "message": message,
+                    "response": final_text,
+                    "tools_used": tools_used,
+                })
+            except Exception as e:
+                print(f"Failed to save conversation: {e}")
+
+            return {
+                "response": final_text,
+                "tools_used": tools_used,
+                "farmer_id": farmer_id,
+            }
+
+    # Exhausted all iterations without a final answer
+    return {
+        "response": "I was unable to fully process your request. Please try a simpler question.",
+        "tools_used": tools_used,
+        "farmer_id": farmer_id,
+    }
+
 def handle_chat(event):
-    """Handle POST /api/chat — ReAct agent loop using Bedrock Converse API."""
+    """Handle POST /api/chat — Chat endpoint for React Frontend."""
     try:
         body = json.loads(event.get("body", "{}"))
         message = body.get("message", "")
         farmer_id = body.get("farmer_id", "anonymous")
         image_key = body.get("image_key")
+        history = body.get("history", [])
 
         if not message and not image_key:
             return api_response(400, {"error": "Message or image required"})
 
-        # Build conversation history from client
-        history = body.get("history", [])
-        messages = []
-        for h in history[-10:]:  # Last 10 messages for context window safety
-            role = h.get("role", "user")
-            content = h.get("content", "")
-            if role in ("user", "assistant") and content:
-                messages.append({"role": role, "content": [{"text": content}]})
-
-        # Add current user message
         if image_key:
             user_text = f"{message or 'Please analyze this crop image.'}\n\n[User uploaded a crop image with key: {image_key}. Use the analyze_crop_image tool with this image_key to analyze it.]"
         else:
             user_text = message
-        user_content = [{"text": user_text}]
-        messages.append({"role": "user", "content": user_content})
-        tools_used = []
-
-        # ReAct loop — up to 5 iterations
-        for iteration in range(5):
-            response = bedrock.converse(
-                modelId=MODEL_ID,
-                system=[{"text": SYSTEM_PROMPT}],
-                messages=messages,
-                toolConfig={"tools": TOOL_DEFINITIONS},
-                inferenceConfig={"maxTokens": 2048, "temperature": 0.3},
-            )
-
-            stop_reason = response.get("stopReason", "end_turn")
-            output_message = response["output"]["message"]
-            messages.append(output_message)
-
-            if stop_reason == "tool_use":
-                tool_results = []
-                for block in output_message["content"]:
-                    if "toolUse" in block:
-                        tool_call = block["toolUse"]
-                        tool_name = tool_call["name"]
-                        tool_input = tool_call["input"]
-                        tool_use_id = tool_call["toolUseId"]
-                        tools_used.append(tool_name)
-
-                        print(f"[ReAct] iter={iteration} tool={tool_name} input={json.dumps(tool_input)}")
-
-                        try:
-                            result_text = TOOL_DISPATCH[tool_name](tool_input)
-                        except Exception as e:
-                            result_text = f"Tool error: {str(e)}"
-
-                        tool_results.append({
-                            "toolResult": {
-                                "toolUseId": tool_use_id,
-                                "content": [{"text": result_text}],
-                            }
-                        })
-
-                messages.append({"role": "user", "content": tool_results})
-            else:
-                # Final response — extract text
-                final_text = ""
-                for block in output_message["content"]:
-                    if "text" in block:
-                        final_text += block["text"]
-
-                # Strip XML tags that Nova sometimes adds
-                final_text = re.sub(r'<thinking>.*?</thinking>\s*', '', final_text, flags=re.DOTALL)
-                final_text = re.sub(r'</?(?:response|answer|result|output)>\s*', '', final_text)
-                final_text = final_text.strip()
-
-                # Save conversation to DynamoDB
-                try:
-                    conv_table = dynamodb.Table(CONVERSATIONS_TABLE)
-                    conv_table.put_item(Item={
-                        "farmer_id": farmer_id,
-                        "timestamp": datetime.utcnow().isoformat(),
-                        "message": message,
-                        "response": final_text,
-                        "tools_used": tools_used,
-                    })
-                except Exception as e:
-                    print(f"Failed to save conversation: {e}")
-
-                return api_response(200, {
-                    "response": final_text,
-                    "tools_used": tools_used,
-                    "farmer_id": farmer_id,
-                })
-
-        # Exhausted all iterations without a final answer
-        return api_response(200, {
-            "response": "I was unable to fully process your request. Please try a simpler question.",
-            "tools_used": tools_used,
-            "farmer_id": farmer_id,
-        })
+            
+        result = run_agent(farmer_id, user_text, message=message, history=history)
+        return api_response(200, result)
 
     except Exception as e:
         print(f"Chat error: {e}")
         return api_response(500, {"error": f"Agent error: {str(e)}"})
+
+
+# ==============================================================================
+# 9. WHATSAPP/TWILIO WEBHOOK
+# ==============================================================================
+
+import urllib.request
+import urllib.parse
+from urllib.error import URLError
+
+TWILIO_SECRET_ARN = os.environ.get("TWILIO_SECRET_ARN")
+TWILIO_ACCOUNT_SID = None
+TWILIO_AUTH_TOKEN = None
+
+def load_twilio_secrets():
+    """Load Twilio credentials from AWS Secrets Manager."""
+    global TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+    
+    if TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN:
+        return True # Already loaded
+        
+    if not TWILIO_SECRET_ARN:
+        print("WARNING: TWILIO_SECRET_ARN environment variable not set.")
+        return False
+        
+    try:
+        secrets_client = boto3.client("secretsmanager", region_name=REGION)
+        response = secrets_client.get_secret_value(SecretId=TWILIO_SECRET_ARN)
+        secret_string = response.get("SecretString")
+        if secret_string:
+            secrets_dict = json.loads(secret_string)
+            TWILIO_ACCOUNT_SID = secrets_dict.get("TWILIO_ACCOUNT_SID")
+            TWILIO_AUTH_TOKEN = secrets_dict.get("TWILIO_AUTH_TOKEN")
+            return True
+    except Exception as e:
+        print(f"Failed to load Twilio secrets from Secrets Manager: {e}")
+        
+    return False
+
+def fetch_twilio_media(media_url):
+    """Fetch media from Twilio securely using Basic Auth."""
+    load_twilio_secrets() # Ensure secrets are loaded
+    
+    if not TWILIO_ACCOUNT_SID or not TWILIO_AUTH_TOKEN:
+        print("WARNING: Twilio credentials not set, cannot fetch media securely in production.")
+        # Attempt unauthenticated fetch (might fail depending on Twilio settings)
+        req = urllib.request.Request(media_url)
+    else:
+        auth_str = f"{TWILIO_ACCOUNT_SID}:{TWILIO_AUTH_TOKEN}"
+        auth_bytes = auth_str.encode("utf-8")
+        base64_auth = base64.b64encode(auth_bytes).decode("utf-8")
+        req = urllib.request.Request(media_url)
+        req.add_header("Authorization", f"Basic {base64_auth}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return response.read()
+    except Exception as e:
+        print(f"Error fetching Twilio media: {e}")
+        return None
+
+def transcribe_audio_with_nova(audio_bytes, mime_type):
+    """Transcribe WhatsApp audio note using Bedrock Nova."""
+    try:
+        # Determine format (nova supports mp3, wav, flac, ogg, m4a, webm)
+        ext = "m4a" # default fallback
+        if "ogg" in mime_type: ext = "ogg"
+        elif "mp4" in mime_type or "m4a" in mime_type: ext = "m4a"
+        elif "webm" in mime_type: ext = "webm"
+        
+        # We use a standard generation call, passing audio to the model
+        response = bedrock.converse(
+            modelId=MODEL_ID,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "document": {
+                            "name": "audio_note",
+                            "format": ext,
+                            "source": {"bytes": audio_bytes}
+                        }
+                    },
+                    {"text": "Transcribe this audio precisely. Return ONLY the transcribed text with no extra commentary."}
+                ]
+            }],
+        )
+        output_msg = response["output"]["message"]
+        for block in output_msg["content"]:
+            if "text" in block:
+                return block["text"].strip()
+        return ""
+    except Exception as e:
+        print(f"Audio transcription error: {e}")
+        for arg in e.args:
+            if 'ValidationException' in str(arg):
+                return "(Error: Audio format not supported by current Bedrock model region. Please send text.)"
+        return ""
+
+def describe_image_with_nova(image_bytes, mime_type):
+    """Describe WhatsApp image using Bedrock Nova."""
+    try:
+        format_map = {"image/jpeg": "jpeg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
+        image_format = format_map.get(mime_type, "jpeg")
+        
+        response = bedrock.converse(
+            modelId=MODEL_ID,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "image": {
+                            "format": image_format,
+                            "source": {"bytes": image_bytes}
+                        }
+                    },
+                    {"text": "Analyze this image from an agricultural perspective. Describe what you see in detail. If it is a plant, note its apparent health and signs of disease or pest. Be concise but descriptive!"}
+                ]
+            }],
+        )
+        output_msg = response["output"]["message"]
+        for block in output_msg["content"]:
+            if "text" in block:
+                return block["text"].strip()
+        return ""
+    except Exception as e:
+        print(f"Image description error: {e}")
+        return ""
+
+
+def handle_twilio_webhook(event):
+    """Handle POST /sms from Twilio for WhatsApp/SMS users."""
+    try:
+        body = event.get("body", "")
+        if event.get("isBase64Encoded", False):
+            body = base64.b64decode(body).decode('utf-8')
+            
+        # Parse URL-encoded form data
+        parsed_body = urllib.parse.parse_qs(body)
+        
+        # Helper to get first item safely
+        def get_field(key, default=""):
+            val = parsed_body.get(key, [default])
+            return val[0] if val else default
+
+        sender_number = get_field("From", "anonymous").strip()
+        agent_input_text = get_field("Body", "").strip()
+        media_url = get_field("MediaUrl0", "").strip()
+        media_content_type = get_field("MediaContentType0", "").strip()
+        
+        print(f"WhatsApp webhook from: {sender_number}, Text: {agent_input_text}, Media: {media_url}")
+
+        # 1. Pre-process Media if present
+        if media_url:
+            media_bytes = fetch_twilio_media(media_url)
+            if not media_bytes:
+                agent_input_text = "(Could not securely download the attached media from Twilio)"
+            elif media_content_type.startswith("audio/"):
+                transcription = transcribe_audio_with_nova(media_bytes, media_content_type)
+                agent_input_text = transcription if transcription else "(Could not understand the audio)"
+            elif media_content_type.startswith("image/"):
+                description = describe_image_with_nova(media_bytes, media_content_type)
+                # Pass the visual description to the core agent as if the user typed it
+                agent_input_text = f"I have uploaded an image. Here is the visual description of it: {description}. Please help me with this."
+        
+        if not agent_input_text:
+            xml_response = '<?xml version="1.0" encoding="UTF-8"?><Response><Message>Please send a text or voice message.</Message></Response>'
+            return {"statusCode": 200, "headers": {"Content-Type": "text/xml"}, "body": xml_response}
+
+        # 2. Fetch Chat History (DynamoDB)
+        history = []
+        try:
+            conv_table = dynamodb.Table(CONVERSATIONS_TABLE)
+            db_response = conv_table.query(
+                KeyConditionExpression=Key("farmer_id").eq(sender_number),
+                ScanIndexForward=False, # Get latest first
+                Limit=10
+            )
+            # Reconstruct history for ReAct loop (reverse back to chronological order)
+            for item in reversed(db_response.get("Items", [])):
+                history.append({"role": "user", "content": item.get("message", "")})
+                history.append({"role": "assistant", "content": item.get("response", "")})
+        except Exception as e:
+            print(f"Failed to fetch history for WhatsApp user {sender_number}: {e}")
+
+        # 3. Run Agent (Reuse exact same logic as Website)
+        result = run_agent(sender_number, agent_input_text, message=agent_input_text, history=history)
+        final_text = result.get("response", "An error occurred.")
+
+        # 4. XML Response for Twilio
+        # Twilio requires valid TwiML
+        from xml.sax.saxutils import escape
+        escaped_text = escape(final_text)
+        
+        xml_response = f'<?xml version="1.0" encoding="UTF-8"?><Response><Message>{escaped_text}</Message></Response>'
+        
+        return {
+            "statusCode": 200,
+            "headers": {
+                "Content-Type": "text/xml"
+            },
+            "body": xml_response
+        }
+
+    except Exception as e:
+        print(f"WhatsApp webhook error: {e}")
+        xml_error = '<?xml version="1.0" encoding="UTF-8"?><Response><Message>Sorry, an internal error occurred.</Message></Response>'
+        return {"statusCode": 500, "headers": {"Content-Type": "text/xml"}, "body": xml_error}
