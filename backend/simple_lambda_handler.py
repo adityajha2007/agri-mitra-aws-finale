@@ -19,6 +19,7 @@ import base64
 import boto3
 from decimal import Decimal
 from datetime import datetime
+from datetime import timedelta
 from boto3.dynamodb.conditions import Key, Attr
 
 REGION = "ap-south-1"
@@ -443,16 +444,12 @@ TOOL_DEFINITIONS = [
                             "type": "string",
                             "description": "Name of the crop (e.g. wheat, rice, onion, tomato)"
                         },
-                        "market_name": {
-                            "type": "string",
-                            "description": "Market/mandi name (e.g. Delhi Azadpur, Mumbai APMC)"
-                        },
                         "days_ahead": {
                             "type": "integer",
                             "description": "Number of days to forecast (1-30, default 7)"
                         }
                     },
-                    "required": ["crop_name", "market_name"]
+                    "required": ["crop_name"]
                 }
             }
         }
@@ -857,7 +854,7 @@ def tool_crop_price_predictor(params):
     """Predict future crop prices using SARIMA time series forecasting."""
     try:
         crop_name = params.get("crop_name", "")
-        market_name = params.get("market_name", "")
+        market_name = params.get("district", "")
         days_ahead = int(params.get("days_ahead", 7))
         
         if days_ahead < 1 or days_ahead > 30:
@@ -868,15 +865,15 @@ def tool_crop_price_predictor(params):
         
         # Fetch historical data (last 90 days)
         table = dynamodb.Table(MANDI_PRICES_TABLE)
-        response = table.query(
-            KeyConditionExpression=Key("crop_name").eq(crop_name)
+        response = table.scan(
+            FilterExpression=Attr("crop_name").eq(crop_name) & Attr("market_name").eq(market_name)
         )
         items = response.get("Items", [])
         
         if not items:
             return f"No historical price data found for crop: {crop_name}"
         
-        # Filter by market
+        # Filter by district (market)
         market_items = [
             i for i in items
             if market_name.lower() in i.get("market_name", "").lower()
@@ -886,7 +883,7 @@ def tool_crop_price_predictor(params):
             return f"No historical price data found for {crop_name} at {market_name}"
         
         # Sort by date and extract prices
-        market_items.sort(key=lambda x: x.get("market_date", ""))
+        market_items.sort(key=lambda x: x.get("date", ""))
         
         if len(market_items) < 14:
             return f"Insufficient historical data for prediction. Need at least 14 days, found {len(market_items)} days."
@@ -1169,10 +1166,12 @@ def handle_chat(event):
                         tools_used.append(tool_name)
                         
                         # Inject district into tool calls if not provided
-                        if district and tool_name in ["get_weather", "get_mandi_prices"]:
+                        if district and tool_name in ["get_weather", "get_mandi_prices", "crop_price_predictor"]:
                             if tool_name == "get_weather" and not tool_input.get("district"):
                                 tool_input["district"] = district
                             elif tool_name == "get_mandi_prices" and not tool_input.get("district"):
+                                tool_input["district"] = district
+                            elif tool_name == "crop_price_predictor" and not tool_input.get("district"):
                                 tool_input["district"] = district
 
                         print(f"[ReAct] iter={iteration} tool={tool_name} input={json.dumps(tool_input)}")
@@ -1188,6 +1187,8 @@ def handle_chat(event):
                                 "content": [{"text": result_text}],
                             }
                         })
+
+                        print(f"[ReAct] Tool '{tool_name}' returned: {result_text}")
 
                 messages.append({"role": "user", "content": tool_results})
             else:
