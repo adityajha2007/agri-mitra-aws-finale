@@ -5,7 +5,11 @@ import WeatherWidget from "./WeatherWidget";
 import NewsFeed from "./NewsFeed";
 import { api, DashboardPrices, WeatherData, NewsItem } from "../../services/api";
 
-export default function DashboardPanel() {
+interface DashboardPanelProps {
+  district: string;
+}
+
+export default function DashboardPanel({ district }: DashboardPanelProps) {
   const [prices, setPrices] = useState<DashboardPrices[]>([]);
   const [weather, setWeather] = useState<WeatherData | null>(null);
   const [news, setNews] = useState<NewsItem[]>([]);
@@ -14,10 +18,12 @@ export default function DashboardPanel() {
 
   useEffect(() => {
     async function fetchDashboard() {
+      setLoading(true);
+      setError(null);
       try {
         const [pricesData, weatherData, newsData] = await Promise.all([
-          api.getDashboardPrices(),
-          api.getDashboardWeather(),
+          api.getDashboardPrices(district),
+          api.getDashboardWeather(district),
           api.getDashboardNews(),
         ]);
         setPrices(pricesData);
@@ -31,7 +37,7 @@ export default function DashboardPanel() {
       }
     }
     fetchDashboard();
-  }, []);
+  }, [district]);
 
   const greeting = () => {
     const hour = new Date().getHours();

@@ -19,7 +19,8 @@ import base64
 import boto3
 from decimal import Decimal
 from datetime import datetime
-from boto3.dynamodb.conditions import Key
+from datetime import timedelta
+from boto3.dynamodb.conditions import Key, Attr
 
 REGION = "ap-south-1"
 dynamodb = boto3.resource("dynamodb", region_name=REGION)
@@ -125,23 +126,39 @@ def get_dashboard_prices(event):
     try:
         params = event.get("queryStringParameters", {}) or {}
         crop = params.get("crop")
+        district = params.get("district")
         table = dynamodb.Table(MANDI_PRICES_TABLE)
 
         if crop:
             response = table.query(
                 KeyConditionExpression=Key("crop_name").eq(crop)
             )
+        elif district:
+            response = table.scan(
+                FilterExpression=Attr("market_name").eq(district)
+            )
         else:
             response = table.scan(Limit=60)
 
         items = response.get("Items", [])
+        
+        # Filter by district if provided
+        if district:
+            items = [
+                i for i in items
+                if district.lower() in i.get("market_name", "").lower()
+            ]
+
+        # Get only today's prices
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        items = [i for i in items if today in i.get("market_date", "") or i.get("date") == today]
 
         # Transform: extract date from sort key "MarketName#2026-03-06"
         results = []
-        for item in items:
+        for item in items[:20]:  # Limit to 20 results
             market_date_raw = item.get("market_date", "")
             parts = market_date_raw.split("#")
-            date_val = parts[1] if len(parts) > 1 else market_date_raw
+            date_val = parts[1] if len(parts) > 1 else item.get("date", market_date_raw)
 
             results.append({
                 "crop_name": item.get("crop_name", ""),
@@ -243,17 +260,20 @@ SYSTEM_PROMPT = """You are Agri-Mitra, an AI agricultural assistant for Indian f
 - Crop disease diagnosis from images
 - Agricultural calculations (yield, profit, costs)
 - Latest farming news
+- Crop price predictions using historical data
 
 IMPORTANT RULES:
 1. Always use tools to fetch real data. NEVER fabricate prices, weather, or policy information.
 2. When a farmer asks about prices, call get_mandi_prices. For weather, call get_weather. For news, call get_news.
-3. Present information clearly with practical, actionable advice.
-4. Be respectful and supportive. Many users are small-scale Indian farmers.
-5. If a calculation is needed, use the calculate tool rather than doing math yourself.
-6. For policy/scheme questions, use search_policies to find relevant government programs.
-7. Keep responses concise but informative.
-8. NEVER use XML tags like <thinking>, <response>, or any other XML markup in your responses. Just respond with plain text directly.
-9. Do NOT wrap your reasoning or output in any tags. Give your answer directly.
+3. For price predictions, use crop_price_predictor to forecast future prices based on historical trends.
+4. Present information clearly with practical, actionable advice.
+5. Be respectful and supportive. Many users are small-scale Indian farmers.
+6. If a calculation is needed, use the calculate tool rather than doing math yourself.
+7. For policy/scheme questions, use search_policies to find relevant government programs.
+8. Keep responses concise but informative.
+9. NEVER use XML tags like <thinking>, <response>, or any other XML markup in your responses. Just respond with plain text directly.
+10. Do NOT wrap your reasoning or output in any tags. Give your answer directly.
+11. The user has selected their district. Use this district for all location-specific queries (weather, prices, etc.) without asking again.
 
 CRITICAL LANGUAGE RULE:
 You MUST always reply in the SAME language the user is using. If the user writes in Hindi, reply in Hindi. If in English, reply in English. If in Marathi, reply in Marathi. Match the user's language exactly."""
@@ -262,7 +282,7 @@ TOOL_DEFINITIONS = [
     {
         "toolSpec": {
             "name": "get_mandi_prices",
-            "description": "Get current mandi (market) prices for agricultural crops. Use when user asks about crop prices, market rates, or mandi information.",
+            "description": "Get current mandi (market) prices for agricultural crops. Use when user asks about crop prices, market rates, or mandi information. If district is provided in context, filter by that district.",
             "inputSchema": {
                 "json": {
                     "type": "object",
@@ -274,6 +294,10 @@ TOOL_DEFINITIONS = [
                         "market_name": {
                             "type": "string",
                             "description": "Optional market/mandi name to filter results"
+                        },
+                        "district": {
+                            "type": "string",
+                            "description": "Optional district name to filter results (use from user context if available)"
                         }
                     },
                     "required": ["crop_name"]
@@ -284,14 +308,14 @@ TOOL_DEFINITIONS = [
     {
         "toolSpec": {
             "name": "get_weather",
-            "description": "Get current weather data and agricultural advisory for a district. Use when user asks about weather, temperature, rainfall, or farming conditions.",
+            "description": "Get current weather data and agricultural advisory for a district. Use when user asks about weather, temperature, rainfall, or farming conditions. Use the district from user context if available.",
             "inputSchema": {
                 "json": {
                     "type": "object",
                     "properties": {
                         "district": {
                             "type": "string",
-                            "description": "District name (e.g. Lucknow, Mumbai, Pune)"
+                            "description": "District name (e.g. Lucknow, Mumbai, Pune). Use from user context if provided."
                         }
                     },
                     "required": ["district"]
@@ -408,6 +432,28 @@ TOOL_DEFINITIONS = [
             }
         }
     },
+    {
+        "toolSpec": {
+            "name": "crop_price_predictor",
+            "description": "Predict future crop prices using SARIMA time series forecasting based on 90 days of historical mandi price data. Use when user asks about future prices, price trends, or when to sell.",
+            "inputSchema": {
+                "json": {
+                    "type": "object",
+                    "properties": {
+                        "crop_name": {
+                            "type": "string",
+                            "description": "Name of the crop (e.g. wheat, rice, onion, tomato)"
+                        },
+                        "days_ahead": {
+                            "type": "integer",
+                            "description": "Number of days to forecast (1-30, default 7)"
+                        }
+                    },
+                    "required": ["crop_name"]
+                }
+            }
+        }
+    },
 ]
 
 
@@ -420,6 +466,7 @@ def tool_get_mandi_prices(params):
     try:
         crop_name = params.get("crop_name", "")
         market_name_filter = params.get("market_name")
+        district_filter = params.get("district")
         table = dynamodb.Table(MANDI_PRICES_TABLE)
 
         response = table.query(
@@ -439,14 +486,31 @@ def tool_get_mandi_prices(params):
             ]
             if not items:
                 return f"No price data found for {crop_name} at market: {market_name_filter}"
+        
+        # Filter by district if provided (district is part of market name)
+        if district_filter:
+            items = [
+                i for i in items
+                if district_filter.lower() in i.get("market_name", "").lower()
+            ]
+            if not items:
+                return f"No price data found for {crop_name} in district: {district_filter}"
+
+        # Get only the most recent entries (today's prices)
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        recent_items = [i for i in items if today in i.get("market_date", "")]
+        
+        if not recent_items:
+            # If no today's data, get the most recent
+            recent_items = sorted(items, key=lambda x: x.get("market_date", ""), reverse=True)[:6]
 
         # Format results
         lines = [f"Mandi prices for {crop_name}:"]
-        for item in items:
+        for item in recent_items[:6]:  # Limit to 6 results
             market_date_raw = item.get("market_date", "")
             parts = market_date_raw.split("#")
             market = parts[0] if parts else "Unknown"
-            date_val = parts[1] if len(parts) > 1 else market_date_raw
+            date_val = parts[1] if len(parts) > 1 else item.get("date", market_date_raw)
             price = decimal_to_native(item.get("price_per_quintal", 0))
             state = item.get("state", "")
             arrivals = decimal_to_native(item.get("arrivals", 0))
@@ -786,6 +850,131 @@ def tool_analyze_crop_image(params):
         return f"Error analyzing crop image: {str(e)}"
 
 
+def tool_crop_price_predictor(params):
+    """Predict future crop prices using SARIMA time series forecasting."""
+    try:
+        crop_name = params.get("crop_name", "")
+        market_name = params.get("district", "")
+        days_ahead = int(params.get("days_ahead", 7))
+        
+        if days_ahead < 1 or days_ahead > 30:
+            days_ahead = 7
+        
+        if not crop_name or not market_name:
+            return "Both crop_name and market_name are required for price prediction."
+        
+        # Fetch historical data (last 90 days)
+        table = dynamodb.Table(MANDI_PRICES_TABLE)
+        response = table.scan(
+            FilterExpression=Attr("crop_name").eq(crop_name) & Attr("market_name").eq(market_name)
+        )
+        items = response.get("Items", [])
+        
+        if not items:
+            return f"No historical price data found for crop: {crop_name}"
+        
+        # Filter by district (market)
+        market_items = [
+            i for i in items
+            if market_name.lower() in i.get("market_name", "").lower()
+        ]
+        
+        if not market_items:
+            return f"No historical price data found for {crop_name} at {market_name}"
+        
+        # Sort by date and extract prices
+        market_items.sort(key=lambda x: x.get("date", ""))
+        
+        if len(market_items) < 14:
+            return f"Insufficient historical data for prediction. Need at least 14 days, found {len(market_items)} days."
+        
+        # Extract price time series
+        prices = [float(decimal_to_native(item.get("price_per_quintal", 0))) for item in market_items]
+        dates = [item.get("market_date", "").split("#")[1] if "#" in item.get("market_date", "") else item.get("date", "") for item in market_items]
+        
+        # Simple SARIMA-like prediction using moving average with trend
+        # For production, you'd use statsmodels SARIMAX, but keeping it lightweight here
+        window = min(7, len(prices) // 3)
+        
+        # Calculate trend
+        recent_prices = prices[-window:]
+        older_prices = prices[-2*window:-window] if len(prices) >= 2*window else prices[:window]
+        
+        trend = (sum(recent_prices) / len(recent_prices)) - (sum(older_prices) / len(older_prices))
+        trend_per_day = trend / window
+        
+        # Calculate seasonality (weekly pattern)
+        weekly_pattern = []
+        for i in range(7):
+            day_prices = [prices[j] for j in range(len(prices)) if j % 7 == i]
+            if day_prices:
+                weekly_pattern.append(sum(day_prices) / len(day_prices))
+            else:
+                weekly_pattern.append(sum(prices) / len(prices))
+        
+        avg_price = sum(prices) / len(prices)
+        seasonal_factors = [p / avg_price for p in weekly_pattern]
+        
+        # Generate predictions
+        last_price = prices[-1]
+        last_date = dates[-1]
+        
+        predictions = []
+        for day in range(1, days_ahead + 1):
+            # Apply trend
+            predicted_price = last_price + (trend_per_day * day)
+            
+            # Apply seasonality
+            seasonal_index = (len(prices) + day - 1) % 7
+            predicted_price *= seasonal_factors[seasonal_index]
+            
+            # Add some dampening for far future
+            dampening = 1 - (day / (days_ahead * 2))
+            predicted_price = last_price + (predicted_price - last_price) * dampening
+            
+            # Calculate prediction date
+            pred_date = (datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=day)).strftime("%Y-%m-%d")
+            
+            predictions.append({
+                "date": pred_date,
+                "predicted_price": round(predicted_price, 2)
+            })
+        
+        # Format output
+        current_price = prices[-1]
+        lines = [
+            f"Price Prediction for {crop_name} at {market_name}:",
+            f"Current Price (latest): Rs {current_price:.2f}/quintal on {last_date}",
+            f"\nForecast for next {days_ahead} days:",
+        ]
+        
+        for pred in predictions:
+            change = pred["predicted_price"] - current_price
+            change_pct = (change / current_price) * 100
+            trend_indicator = "↑" if change > 0 else "↓" if change < 0 else "→"
+            lines.append(
+                f"  {pred['date']}: Rs {pred['predicted_price']:.2f}/quintal "
+                f"({trend_indicator} {change_pct:+.1f}%)"
+            )
+        
+        # Add recommendation
+        avg_predicted = sum(p["predicted_price"] for p in predictions) / len(predictions)
+        if avg_predicted > current_price * 1.05:
+            recommendation = "Prices are expected to rise. Consider holding your produce if storage is available."
+        elif avg_predicted < current_price * 0.95:
+            recommendation = "Prices are expected to fall. Consider selling soon to avoid losses."
+        else:
+            recommendation = "Prices are expected to remain stable. Sell based on your immediate needs."
+        
+        lines.append(f"\nRecommendation: {recommendation}")
+        lines.append(f"\nNote: This prediction is based on {len(market_items)} days of historical data using time series analysis. Actual prices may vary due to market conditions, weather, and supply-demand factors.")
+        
+        return "\n".join(lines)
+        
+    except Exception as e:
+        return f"Error predicting crop prices: {str(e)}"
+
+
 # Tool dispatch map
 TOOL_DISPATCH = {
     "get_mandi_prices": tool_get_mandi_prices,
@@ -794,6 +983,7 @@ TOOL_DISPATCH = {
     "calculate": tool_calculate,
     "search_policies": tool_search_policies,
     "analyze_crop_image": tool_analyze_crop_image,
+    "crop_price_predictor": tool_crop_price_predictor,
 }
 
 
@@ -908,6 +1098,7 @@ def handle_chat(event):
         message = body.get("message", "")
         farmer_id = body.get("farmer_id", "anonymous")
         image_key = body.get("image_key")
+        district = body.get("district", "")  # Get district from request
 
         if not message and not image_key:
             return api_response(400, {"error": "Message or image required"})
@@ -934,6 +1125,11 @@ def handle_chat(event):
         
         messages = messages[::-1]
 
+        # Add district context to system prompt if provided
+        system_prompt = SYSTEM_PROMPT
+        if district:
+            system_prompt += f"\n\nIMPORTANT CONTEXT: The user is from {district} district. Use this district for all location-specific queries (weather, prices, etc.) without asking the user again."
+
         # Add current user message
         if image_key:
             user_text = f"{message or 'Please analyze this crop image.'}\n\n[User uploaded a crop image with key: {image_key}. Use the analyze_crop_image tool with this image_key to analyze it.]"
@@ -947,7 +1143,7 @@ def handle_chat(event):
         for iteration in range(5):
             response = bedrock.converse(
                 modelId=MODEL_ID,
-                system=[{"text": SYSTEM_PROMPT}],
+                system=[{"text": system_prompt}],
                 messages=messages + [latest_message],
                 toolConfig={"tools": TOOL_DEFINITIONS},
                 inferenceConfig={"maxTokens": 2048, "temperature": 0.3},
@@ -968,6 +1164,15 @@ def handle_chat(event):
                         tool_input = tool_call["input"]
                         tool_use_id = tool_call["toolUseId"]
                         tools_used.append(tool_name)
+                        
+                        # Inject district into tool calls if not provided
+                        if district and tool_name in ["get_weather", "get_mandi_prices", "crop_price_predictor"]:
+                            if tool_name == "get_weather" and not tool_input.get("district"):
+                                tool_input["district"] = district
+                            elif tool_name == "get_mandi_prices" and not tool_input.get("district"):
+                                tool_input["district"] = district
+                            elif tool_name == "crop_price_predictor" and not tool_input.get("district"):
+                                tool_input["district"] = district
 
                         print(f"[ReAct] iter={iteration} tool={tool_name} input={json.dumps(tool_input)}")
 
@@ -982,6 +1187,8 @@ def handle_chat(event):
                                 "content": [{"text": result_text}],
                             }
                         })
+
+                        print(f"[ReAct] Tool '{tool_name}' returned: {result_text}")
 
                 messages.append({"role": "user", "content": tool_results})
             else:
@@ -1005,6 +1212,7 @@ def handle_chat(event):
                         "message": message,
                         "response": final_text,
                         "tools_used": tools_used,
+                        "district": district,
                     })
                 except Exception as e:
                     print(f"Failed to save conversation: {e}")

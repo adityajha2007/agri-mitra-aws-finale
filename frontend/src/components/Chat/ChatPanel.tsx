@@ -11,7 +11,11 @@ const quickActions = [
   "Government schemes for farmers",
 ];
 
-export default function ChatPanel() {
+interface ChatPanelProps {
+  district: string;
+}
+
+export default function ChatPanel({ district }: ChatPanelProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(false);
@@ -88,7 +92,7 @@ export default function ChatPanel() {
         role: m.role,
         content: m.content,
       }));
-      const response = await api.sendChatMessage(text, imageKey, history);
+      const response = await api.sendChatMessage(text, imageKey, history, district);
       const assistantMessage: ChatMessage = {
         role: "assistant",
         content: response.response,
