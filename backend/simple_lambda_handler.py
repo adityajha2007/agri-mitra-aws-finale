@@ -127,35 +127,35 @@ def get_dashboard_prices(event):
         params = event.get("queryStringParameters", {}) or {}
         crop = params.get("crop")
         district = params.get("district")
+
+        today = datetime.utcnow().strftime("%Y-%m-%d") # Get only today's prices
+
         table = dynamodb.Table(MANDI_PRICES_TABLE)
 
+        items = []
         if crop:
             response = table.query(
-                KeyConditionExpression=Key("crop_name").eq(crop)
+                KeyConditionExpression=Key("crop_name").eq(crop),
+                FilterExpression=Attr("date").eq(today)
             )
+            items.extend(response["Items"])
         elif district:
             response = table.scan(
-                FilterExpression=Attr("market_name").eq(district)
+                FilterExpression=Attr("market_name").eq(district) & Attr("date").eq(today)
             )
+            items.extend(response["Items"])
+            while "LastEvaluatedKey" in response:
+                response = table.scan(
+                    FilterExpression=Attr("market_name").eq(district) & Attr("date").eq(today),
+                    ExclusiveStartKey=response["LastEvaluatedKey"]
+                )
+                items.extend(response["Items"])
         else:
             response = table.scan(Limit=60)
 
-        items = response.get("Items", [])
-        
-        # Filter by district if provided
-        if district:
-            items = [
-                i for i in items
-                if district.lower() in i.get("market_name", "").lower()
-            ]
-
-        # Get only today's prices
-        today = datetime.utcnow().strftime("%Y-%m-%d")
-        items = [i for i in items if today in i.get("market_date", "") or i.get("date") == today]
-
         # Transform: extract date from sort key "MarketName#2026-03-06"
         results = []
-        for item in items[:20]:  # Limit to 20 results
+        for item in items:
             market_date_raw = item.get("market_date", "")
             parts = market_date_raw.split("#")
             date_val = parts[1] if len(parts) > 1 else item.get("date", market_date_raw)
